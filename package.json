@@ -1,0 +1,18 @@
+{
+  "name": "streamx",
+  "version": "1.0.0",
+  "private": true,
+  "description": "StreamX — single-file streaming UI + single serverless backend + Postgres + AI chat. Deployable on Vercel.",
+  "scripts": {
+    "dev": "node dev-server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "express": "^4.21.2"
+  }
+}
