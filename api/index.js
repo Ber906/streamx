@@ -410,28 +410,13 @@ async function watchlistDel(user, id) {
 
 // ─── AI chat ─────────────────────────────────────────────────────────────────
 // GEMINI (recommended — free, no CC, just a Google account):
-//   Get key at https://aistudio.google.com/app/apikey  (1M tokens/day free)
+//   Get key at https://aistudio.google.com/app/apikey  (free, no credit card)
 //   Set GEMINI_API_KEY in Vercel env vars.
-// GROQ (backup — if Gemini unavailable):
+//   Uses native Gemini REST API (gemini-2.5-flash).
+//
+// GROQ (backup):
 //   Get key at https://console.groq.com
 //   Set GROQ_API_KEY in Vercel env vars.
-function aiConfig() {
-  if (process.env.GEMINI_API_KEY) {
-    return {
-      key:   process.env.GEMINI_API_KEY,
-      base:  "https://generativelanguage.googleapis.com/v1beta/openai",
-      model: "gemini-1.5-flash",
-    };
-  }
-  if (process.env.GROQ_API_KEY) {
-    return {
-      key:   process.env.GROQ_API_KEY,
-      base:  "https://api.groq.com/openai/v1",
-      model: "llama-3.3-70b-versatile",
-    };
-  }
-  return null;
-}
 
 const SYSTEM_PROMPT = `You are StreamX AI, a friendly assistant inside a movie / TV / anime streaming site called StreamX.
 Help users discover what to watch. Be warm, concise, and specific. When recommending titles:
@@ -441,24 +426,52 @@ Help users discover what to watch. Be warm, concise, and specific. When recommen
 Keep replies under ~180 words unless the user asks for more.`;
 
 async function aiChat(messages) {
-  const cfg = aiConfig();
-  if (!cfg) throw new Error("AI is not available right now. Please try again later.");
   const safe = (Array.isArray(messages) ? messages : [])
     .filter((m) => m && (m.role === "user" || m.role === "assistant"))
     .slice(-12)
     .map((m) => ({ role: m.role, content: String(m.content || "").slice(0, 4000) }));
-  const payload = {
-    model: cfg.model,
-    messages: [{ role: "system", content: SYSTEM_PROMPT }, ...safe],
-    max_tokens: 600,
-    temperature: 0.7,
-  };
-  const r = await axios.post(`${cfg.base.replace(/\/$/, "")}/chat/completions`, payload, {
-    headers: { Authorization: `Bearer ${cfg.key}`, "Content-Type": "application/json" },
-    timeout: 30000,
-  });
-  const reply = r.data?.choices?.[0]?.message?.content || "I'm not sure how to answer that.";
-  return { success: true, reply };
+
+  // ── Gemini native REST API ──────────────────────────────────────────────────
+  if (process.env.GEMINI_API_KEY) {
+    const key = process.env.GEMINI_API_KEY;
+    const model = "gemini-2.5-flash";
+    // Gemini uses "model" for assistant, "user" for user
+    const contents = safe.map((m) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }],
+    }));
+    const payload = {
+      system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+      contents,
+      generationConfig: { maxOutputTokens: 600, temperature: 0.7 },
+    };
+    const r = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+      payload,
+      { headers: { "Content-Type": "application/json" }, timeout: 30000 }
+    );
+    const reply = r.data?.candidates?.[0]?.content?.parts?.[0]?.text
+      || "I'm not sure how to answer that.";
+    return { success: true, reply };
+  }
+
+  // ── Groq / OpenAI-compat fallback ──────────────────────────────────────────
+  if (process.env.GROQ_API_KEY) {
+    const payload = {
+      model: "llama-3.3-70b-versatile",
+      messages: [{ role: "system", content: SYSTEM_PROMPT }, ...safe.map(m => ({ role: m.role, content: m.content }))],
+      max_tokens: 600,
+      temperature: 0.7,
+    };
+    const r = await axios.post("https://api.groq.com/openai/v1/chat/completions", payload, {
+      headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
+      timeout: 30000,
+    });
+    const reply = r.data?.choices?.[0]?.message?.content || "I'm not sure how to answer that.";
+    return { success: true, reply };
+  }
+
+  throw new Error("AI is not available right now. Please try again later.");
 }
 
 // ─── Dispatcher ──────────────────────────────────────────────────────────────
