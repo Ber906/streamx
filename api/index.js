@@ -30,6 +30,89 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 
+// ─── Anti-Scrape ─────────────────────────────────────────────────────────────
+const RICKROLL_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+
+const BOT_UA_PATTERNS = [
+  /bot/i, /crawl/i, /spider/i, /scrape/i, /slurp/i, /wget/i, /curl/i,
+  /python-requests/i, /python-urllib/i, /go-http-client/i, /java\//i,
+  /libwww-perl/i, /httpclient/i, /okhttp/i, /axios\/\d/i, /node-fetch/i,
+  /scrapy/i, /mechanize/i, /phantomjs/i, /headless/i, /selenium/i,
+  /puppeteer/i, /playwright/i, /cypress/i, /htmlunit/i,
+  /postman/i, /insomnia/i, /httpie/i, /dataprovider/i, /yandex/i,
+  /baiduspider/i, /sogou/i, /exabot/i, /ia_archiver/i,
+];
+
+function isBot(ua) {
+  if (!ua || ua.trim() === "") return true;
+  return BOT_UA_PATTERNS.some((p) => p.test(ua));
+}
+
+function hasValidOrigin(req) {
+  const auth = req.headers["authorization"] || "";
+  if (/^Bearer\s+\S+/i.test(auth)) return true;
+  const host    = req.headers["host"]    || "";
+  const origin  = req.headers["origin"]  || "";
+  const referer = req.headers["referer"] || "";
+  if (origin) {
+    try {
+      const oh = new URL(origin).host;
+      if (oh === host || /^localhost(:\d+)?$/.test(oh)) return true;
+    } catch { /* malformed */ }
+  }
+  if (referer) {
+    try {
+      const rh = new URL(referer).host;
+      if (rh === host || /^localhost(:\d+)?$/.test(rh)) return true;
+    } catch { /* malformed */ }
+  }
+  return false;
+}
+
+function rickRoll(req, res) {
+  const ua          = req.headers["user-agent"] || "";
+  const acceptsHtml = (req.headers["accept"] || "").includes("text/html");
+  const isHeadless  = !acceptsHtml || /headless|curl|wget|python|scrapy|axios\/\d/i.test(ua);
+  if (isHeadless) {
+    res.statusCode = 302;
+    res.setHeader("Location", RICKROLL_URL);
+    res.setHeader("Content-Type", "application/json");
+    return res.end(JSON.stringify({
+      success: false,
+      message: "Never gonna give you up, never gonna let you down \uD83C\uDFB5",
+      hint: RICKROLL_URL,
+    }));
+  }
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  return res.end(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>StreamX \u2014 Access Denied</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{background:#000;color:#fff;font-family:system-ui,sans-serif;
+         display:flex;flex-direction:column;align-items:center;
+         justify-content:center;min-height:100vh;text-align:center;gap:16px}
+    h1{font-size:1.6rem;color:#e8192c}
+    p{color:rgba(255,255,255,.6);font-size:.95rem}
+    .frame{width:min(560px,95vw);aspect-ratio:16/9;border:none;border-radius:12px;
+           box-shadow:0 0 60px rgba(232,25,44,.35)}
+  </style>
+</head>
+<body>
+  <h1>\uD83C\uDFB5 Never Gonna Give You Up</h1>
+  <p>Scraping detected. Enjoy your reward.</p>
+  <iframe class="frame"
+    src="https://www.youtube.com/embed/dQw4w9WgXcQ?autoplay=1&rel=0"
+    allow="autoplay; encrypted-media" allowfullscreen></iframe>
+  <p style="font-size:.8rem;margin-top:8px">\u2014 StreamX Security Team</p>
+</body>
+</html>`);
+}
+
 // ─── DB ──────────────────────────────────────────────────────────────────────
 let pool = null;
 function db() {
@@ -495,7 +578,18 @@ module.exports = async function handler(req, res) {
   }
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("X-Content-Type-Options",  "nosniff");
+  res.setHeader("X-Frame-Options",         "SAMEORIGIN");
+  res.setHeader("Referrer-Policy",         "strict-origin-when-cross-origin");
   if (req.method === "OPTIONS") { res.statusCode = 204; return res.end(); }
+
+  // ── Bot / scraper check ──────────────────────────────────────────────────
+  const _ua  = req.headers["user-agent"] || "";
+  const _sub0 = (req.url || "").replace(/^\/api\/?/, "").split("?")[0].toLowerCase();
+  const _authExempt = _sub0 === "health" || _sub0.startsWith("auth/");
+
+  if (isBot(_ua)) return rickRoll(req, res);
+  if (!_authExempt && !hasValidOrigin(req)) return rickRoll(req, res);
 
   let pathname;
   try { pathname = new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname; }
