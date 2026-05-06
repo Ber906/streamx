@@ -476,7 +476,23 @@ async function aiChat(messages) {
 
 // ─── Dispatcher ──────────────────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  // Restrict CORS to the same origin (the site itself).
+  // Wildcards allow any external site to call the API directly — we don't want that.
+  const requestOrigin = req.headers["origin"] || "";
+  const host = req.headers["host"] || "";
+  let allowedOrigin = "";
+  if (requestOrigin) {
+    try {
+      const originHost = new URL(requestOrigin).host;
+      if (originHost === host || /^localhost(:\d+)?$/.test(originHost)) {
+        allowedOrigin = requestOrigin;
+      }
+    } catch { /* malformed */ }
+  }
+  if (allowedOrigin) {
+    res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+    res.setHeader("Vary", "Origin");
+  }
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   if (req.method === "OPTIONS") { res.statusCode = 204; return res.end(); }
