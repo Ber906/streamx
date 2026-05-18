@@ -30,6 +30,14 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 
+// ── Hardcoded credentials (fallbacks) ─────────────────────────────────────────
+if (!process.env.DATABASE_URL) {
+  process.env.DATABASE_URL = "postgresql://neondb_owner:npg_YuqP3NzC2jrL@ep-sweet-cell-amglfgig-pooler.c-5.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require";
+}
+if (!process.env.GEMINI_API_KEY) {
+  process.env.GEMINI_API_KEY = "AIzaSyCuss6O6A3r8cJ09p0Y01j3YCXfqzkYlTo";
+}
+
 // ─── Anti-Scrape ─────────────────────────────────────────────────────────────
 const RICKROLL_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
 
@@ -157,6 +165,29 @@ async function ensureSchema() {
       PRIMARY KEY (user_id, item_id)
     );
     CREATE INDEX IF NOT EXISTS watchlist_user_added_idx ON watchlist (user_id, added_at DESC);
+    CREATE TABLE IF NOT EXISTS watch_history (
+      user_id      BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      item_id      TEXT NOT NULL,
+      title        TEXT NOT NULL,
+      cover        TEXT,
+      media_type   TEXT,
+      tmdb_id      TEXT,
+      source       TEXT,
+      season       INTEGER DEFAULT 1,
+      episode      INTEGER DEFAULT 1,
+      progress_pct INTEGER DEFAULT 0,
+      updated_at   TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (user_id, item_id)
+    );
+    CREATE INDEX IF NOT EXISTS watch_history_user_idx ON watch_history (user_id, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS community_chat (
+      id         BIGSERIAL PRIMARY KEY,
+      user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      user_name  TEXT NOT NULL,
+      message    TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS comm_chat_created_idx ON community_chat (created_at DESC);
   `);
   schemaReady = true;
 }
@@ -491,6 +522,85 @@ async function watchlistDel(user, id) {
   return { success: true };
 }
 
+// ─── Watch History ────────────────────────────────────────────────────────────
+async function historyGet(user) {
+  await ensureSchema();
+  const r = await db().query(
+    `SELECT item_id,title,cover,media_type,tmdb_id,source,season,episode,progress_pct,updated_at
+     FROM watch_history WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 50`,
+    [user.id]
+  );
+  return {
+    success: true,
+    data: r.rows.map((row) => ({
+      id: row.item_id, title: row.title, cover: row.cover,
+      mediaType: row.media_type, tmdbId: row.tmdb_id ? Number(row.tmdb_id) : null,
+      source: row.source, season: row.season, episode: row.episode,
+      progressPct: row.progress_pct, updatedAt: row.updated_at,
+    })),
+  };
+}
+async function historySave(user, item) {
+  if (!item || !item.id) throw new Error("Missing item id");
+  await ensureSchema();
+  await db().query(
+    `INSERT INTO watch_history (user_id,item_id,title,cover,media_type,tmdb_id,source,season,episode,progress_pct,updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
+     ON CONFLICT (user_id,item_id) DO UPDATE SET
+       title=EXCLUDED.title,cover=EXCLUDED.cover,media_type=EXCLUDED.media_type,
+       tmdb_id=EXCLUDED.tmdb_id,source=EXCLUDED.source,season=EXCLUDED.season,
+       episode=EXCLUDED.episode,progress_pct=EXCLUDED.progress_pct,updated_at=NOW()`,
+    [
+      user.id, String(item.id), item.title || "Untitled", item.cover || null,
+      item.mediaType || null, item.tmdbId != null ? String(item.tmdbId) : null,
+      item.source || null, item.season || 1, item.episode || 1,
+      Math.min(100, Math.max(0, item.progressPct || 0)),
+    ]
+  );
+  return { success: true };
+}
+async function historyDel(user, id) {
+  if (!id) throw new Error("Missing id");
+  await ensureSchema();
+  await db().query(`DELETE FROM watch_history WHERE user_id=$1 AND item_id=$2`, [user.id, String(id)]);
+  return { success: true };
+}
+
+// ─── Community Chat ───────────────────────────────────────────────────────────
+async function chatGet(since) {
+  await ensureSchema();
+  let q, params;
+  if (since) {
+    q = `SELECT id,user_id,user_name,message,created_at FROM community_chat WHERE id>$1 ORDER BY created_at ASC LIMIT 50`;
+    params = [since];
+  } else {
+    q = `SELECT id,user_id,user_name,message,created_at FROM community_chat ORDER BY created_at DESC LIMIT 50`;
+    params = [];
+  }
+  const r = await db().query(q, params);
+  const rows = since ? r.rows : r.rows.reverse();
+  return {
+    success: true,
+    data: rows.map((row) => ({
+      id: String(row.id), userId: String(row.user_id),
+      userName: row.user_name, message: row.message, createdAt: row.created_at,
+    })),
+  };
+}
+async function chatPost(user, message) {
+  const msg = String(message || "").trim().slice(0, 300);
+  if (!msg) throw new Error("Empty message");
+  await ensureSchema();
+  const r = await db().query(
+    `INSERT INTO community_chat (user_id,user_name,message) VALUES ($1,$2,$3) RETURNING id,created_at`,
+    [user.id, user.name || user.email.split("@")[0], msg]
+  );
+  return {
+    success: true,
+    data: { id: String(r.rows[0].id), userId: String(user.id), userName: user.name || user.email.split("@")[0], message: msg, createdAt: r.rows[0].created_at },
+  };
+}
+
 // ─── AI chat ─────────────────────────────────────────────────────────────────
 // GEMINI (recommended — free, no CC, just a Google account):
 //   Get key at https://aistudio.google.com/app/apikey  (free, no credit card)
@@ -654,8 +764,39 @@ module.exports = async function handler(req, res) {
       return send(res, 200, await aiChat(body.messages || []));
     }
 
+    // ─── Watch History (auth required) ────────
+    if (sub === "history") {
+      const u = await currentUser(req);
+      if (!u) return send(res, 401, { success: false, error: "Sign in required" });
+      if (req.method === "GET")    return send(res, 200, await historyGet(u));
+      if (req.method === "POST") {
+        const body = await readBody(req);
+        return send(res, 200, await historySave(u, body.item));
+      }
+      if (req.method === "DELETE") {
+        const body = await readBody(req);
+        return send(res, 200, await historyDel(u, body.id));
+      }
+      return send(res, 405, { success: false, error: "Method not allowed" });
+    }
+
+    // ─── Community Chat (auth required) ────────
+    if (sub === "chat") {
+      const u = await currentUser(req);
+      if (!u) return send(res, 401, { success: false, error: "Sign in required" });
+      if (req.method === "GET") {
+        const since = q.since ? Number(q.since) : null;
+        return send(res, 200, await chatGet(since));
+      }
+      if (req.method === "POST") {
+        const body = await readBody(req);
+        return send(res, 200, await chatPost(u, body.message));
+      }
+      return send(res, 405, { success: false, error: "Method not allowed" });
+    }
+
     // ─── ADMIN (secret key required) ────────
-    const adminKey = process.env.ADMIN_KEY || "streamx-admin-key-2026";
+    const adminKey = process.env.ADMIN_KEY || "Berwin290@";
     if (sub === "admin/users") {
       const key = req.headers["x-admin-key"] || getQuery(req).key;
       if (key !== adminKey) return send(res, 403, { success: false, error: "Unauthorized" });
